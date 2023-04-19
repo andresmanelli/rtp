@@ -24,11 +24,11 @@ const (
 	// sizeof(uint16)
 	h265NaluHeaderSize = 2
 	// https://datatracker.ietf.org/doc/html/rfc7798#section-4.4.2
-	h265NaluAggregationPacketType = 48
+	H265NaluAggregationPacketType = 48
 	// https://datatracker.ietf.org/doc/html/rfc7798#section-4.4.3
-	h265NaluFragmentationUnitType = 49
+	H265NaluFragmentationUnitType = 49
 	// https://datatracker.ietf.org/doc/html/rfc7798#section-4.4.4
-	h265NaluPACIPacketType = 50
+	H265NaluPACIPacketType = 50
 )
 
 // H265NALUHeader is a H265 NAL Unit Header
@@ -91,17 +91,17 @@ func (h H265NALUHeader) TID() uint8 {
 
 // IsAggregationPacket returns whether or not the packet is an Aggregation packet.
 func (h H265NALUHeader) IsAggregationPacket() bool {
-	return h.Type() == h265NaluAggregationPacketType
+	return h.Type() == H265NaluAggregationPacketType
 }
 
 // IsFragmentationUnit returns whether or not the packet is a Fragmentation Unit packet.
 func (h H265NALUHeader) IsFragmentationUnit() bool {
-	return h.Type() == h265NaluFragmentationUnitType
+	return h.Type() == H265NaluFragmentationUnitType
 }
 
 // IsPACIPacket returns whether or not the packet is a PACI packet.
 func (h H265NALUHeader) IsPACIPacket() bool {
-	return h.Type() == h265NaluPACIPacketType
+	return h.Type() == H265NaluPACIPacketType
 }
 
 //
@@ -741,9 +741,14 @@ var (
 // H265Packet represents a H265 packet, stored in the payload of an RTP packet.
 type H265Packet struct {
 	packet        isH265Packet
+	header        H265NALUHeader
 	mightNeedDONL bool
 
 	videoDepacketizer
+}
+
+func (p *H265Packet) Header() H265NALUHeader {
+	return p.header
 }
 
 // WithDONL can be called to specify whether or not DONL might be parsed.
@@ -805,6 +810,8 @@ func (p *H265Packet) Unmarshal(payload []byte) ([]byte, error) {
 		p.packet = decoded
 	}
 
+	p.header = payloadHeader
+
 	return nil, nil
 }
 
@@ -825,7 +832,7 @@ func (*H265Packet) IsPartitionHead(payload []byte) bool {
 		return false
 	}
 
-	if H265NALUHeader(binary.BigEndian.Uint16(payload[0:2])).Type() == h265NaluFragmentationUnitType {
+	if H265NALUHeader(binary.BigEndian.Uint16(payload[0:2])).Type() == H265NaluFragmentationUnitType {
 		return H265FragmentationUnitHeader(payload[2]).S()
 	}
 
@@ -835,6 +842,8 @@ func (*H265Packet) IsPartitionHead(payload []byte) bool {
 const (
 	h265NaluTypeBitmask = 0x7E
 	h265FillerNALUType  = 38
+	H265IDRWNALUType    = 19
+	H265IDRNNALUType    = 20
 	h265AudNALUType     = 35
 	h265SpsNALUType     = 33
 	h265PpsNALUType     = 34
@@ -872,7 +881,7 @@ func (p *H265Payloader) Payload(mtu uint16, payload []byte) [][]byte {
 		case p.spsNalu != nil && p.ppsNalu != nil:
 			// Pack current NALU with SPS and PPS as AP
 			spsh := newH265NALUHeader(p.spsNalu[0], p.spsNalu[1])
-			header := newH265NALUHeader2(false, h265NaluAggregationPacketType, spsh.LayerID(), spsh.TID())
+			header := newH265NALUHeader2(false, H265NaluAggregationPacketType, spsh.LayerID(), spsh.TID())
 
 			spsLen := make([]byte, 2)
 			binary.BigEndian.PutUint16(spsLen, uint16(len(p.spsNalu)))
@@ -919,7 +928,7 @@ func (p *H265Payloader) Payload(mtu uint16, payload []byte) [][]byte {
 			currentFragmentSize := min(maxFragmentSize, naluDataRemaining)
 			out := make([]byte, h265FUHeaderSize+currentFragmentSize)
 
-			plheader := newH265NALUHeader2(naluHeader.F(), h265NaluFragmentationUnitType, naluHeader.LayerID(), naluHeader.TID())
+			plheader := newH265NALUHeader2(naluHeader.F(), H265NaluFragmentationUnitType, naluHeader.LayerID(), naluHeader.TID())
 
 			out[0] = uint8(plheader >> 7)
 			out[1] = uint8(plheader & 0xFF)
