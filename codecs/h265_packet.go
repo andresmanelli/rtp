@@ -13,6 +13,7 @@ import (
 var (
 	errH265CorruptedPacket   = errors.New("corrupted h265 packet")
 	errInvalidH265PacketType = errors.New("invalid h265 packet type")
+	errNotEnoughNalu         = errors.New("Not enough NAL units for an aggregation packet")
 )
 
 //
@@ -41,6 +42,19 @@ type H265NALUHeader uint16
 
 func newH265NALUHeader(highByte, lowByte uint8) H265NALUHeader {
 	return H265NALUHeader((uint16(highByte) << 8) | uint16(lowByte))
+}
+
+func newH265NALUHeader2(F bool, Type uint8, LayerID uint8, TID uint8) H265NALUHeader {
+	var v uint16 = 0
+	if F {
+		v = 0x1 << 15
+	}
+
+	v = v | (uint16(Type&0x3F) << 8)
+	v = v | (uint16(LayerID&0x3F) << 3)
+	v = v | uint16(TID&0x7)
+
+	return H265NALUHeader(v)
 }
 
 // F is the forbidden bit, should always be 0.
@@ -816,4 +830,121 @@ func (*H265Packet) IsPartitionHead(payload []byte) bool {
 	}
 
 	return true
+}
+
+const (
+	h265NaluTypeBitmask = 0x7E
+	h265FillerNALUType  = 38
+	h265AudNALUType     = 35
+	h265SpsNALUType     = 33
+	h265PpsNALUType     = 34
+	h265FUHeaderSize    = 3
+)
+
+type H265Payloader struct {
+	spsNalu, ppsNalu []byte
+}
+
+// Payload fragments a H265 packet across one or more byte arrays
+func (p *H265Payloader) Payload(mtu uint16, payload []byte) [][]byte {
+	var payloads [][]byte
+	if len(payload) == 0 {
+		return payloads
+	}
+
+	emitNalus(payload, func(nalu []byte) {
+		if len(nalu) == 0 {
+			return
+		}
+
+		naluHeader := newH265NALUHeader(nalu[0], nalu[1])
+		naluType := naluHeader.Type()
+
+		switch {
+		case naluType == h265AudNALUType || naluType == h265FillerNALUType:
+			return
+		case naluType == h265SpsNALUType:
+			p.spsNalu = nalu
+			return
+		case naluType == h265PpsNALUType:
+			p.ppsNalu = nalu
+			return
+		case p.spsNalu != nil && p.ppsNalu != nil:
+			// Pack current NALU with SPS and PPS as AP
+			spsh := newH265NALUHeader(p.spsNalu[0], p.spsNalu[1])
+			header := newH265NALUHeader2(false, h265NaluAggregationPacketType, spsh.LayerID(), spsh.TID())
+
+			spsLen := make([]byte, 2)
+			binary.BigEndian.PutUint16(spsLen, uint16(len(p.spsNalu)))
+
+			ppsLen := make([]byte, 2)
+			binary.BigEndian.PutUint16(ppsLen, uint16(len(p.ppsNalu)))
+
+			apNalu := []byte{uint8(header >> 7), uint8(header & 0xFF)}
+			apNalu = append(apNalu, spsLen...)
+			apNalu = append(apNalu, p.spsNalu...)
+			apNalu = append(apNalu, ppsLen...)
+			apNalu = append(apNalu, p.ppsNalu...)
+			if len(apNalu) <= int(mtu) {
+				out := make([]byte, len(apNalu))
+				copy(out, apNalu)
+				payloads = append(payloads, out)
+			}
+
+			p.spsNalu = nil
+			p.ppsNalu = nil
+		}
+
+		// Single NALU
+		if len(nalu) <= int(mtu) {
+			out := make([]byte, len(nalu))
+			copy(out, nalu)
+			payloads = append(payloads, out)
+			return
+		}
+
+		// FU
+		maxFragmentSize := int(mtu) - h265FUHeaderSize
+
+		naluData := nalu
+		naluDataIndex := 0
+		naluDataLength := len(nalu)
+		naluDataRemaining := naluDataLength
+
+		if min(maxFragmentSize, naluDataRemaining) <= 0 {
+			return
+		}
+
+		for naluDataRemaining > 0 {
+			currentFragmentSize := min(maxFragmentSize, naluDataRemaining)
+			out := make([]byte, h265FUHeaderSize+currentFragmentSize)
+
+			plheader := newH265NALUHeader2(naluHeader.F(), h265NaluFragmentationUnitType, naluHeader.LayerID(), naluHeader.TID())
+
+			out[0] = uint8(plheader >> 7)
+			out[1] = uint8(plheader & 0xFF)
+
+			// +---------------+
+			// |0|1|2|3|4|5|6|7|
+			// +-+-+-+-+-+-+-+-+
+			// |S|E|   FUType  |
+			// +---------------+
+
+			if naluDataRemaining == naluDataLength {
+				// Set start bit
+				out[2] |= 1 << 7
+			} else if naluDataRemaining-currentFragmentSize == 0 {
+				// Set end bit
+				out[2] |= 1 << 6
+			}
+
+			copy(out[fuaHeaderSize:], naluData[naluDataIndex:naluDataIndex+currentFragmentSize])
+			payloads = append(payloads, out)
+
+			naluDataRemaining -= currentFragmentSize
+			naluDataIndex += currentFragmentSize
+		}
+	})
+
+	return payloads
 }
