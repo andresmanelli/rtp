@@ -57,7 +57,7 @@ func TestH265_NALU_Header(t *testing.T) {
 		// Fragmentation Unit
 		{
 			RawHeader: []byte{0x62, 0x01},
-			Type:      h265NaluFragmentationUnitType,
+			Type:      H265NaluFragmentationUnitType,
 			LayerID:   0,
 			TID:       1,
 			IsFU:      true,
